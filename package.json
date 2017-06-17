@@ -13,6 +13,9 @@
     "slack",
     "spsp"
   ],
+  "engines": {
+    "node": "8.1.2"
+  },
   "author": "Evan Schwartz <evan@ripple.com>",
   "license": "ISC",
   "dependencies": {
