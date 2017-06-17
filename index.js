@@ -1,12 +1,13 @@
 'use strict'
 
-const slack = require('slack')
 const request = require('superagent')
 const Koa = require('koa')
 const bodyparser = require('koa-bodyparser')
 const route = require('koa-route')
 const { URL } = require('url')
 const crypto = require('crypto')
+// TODO use a better db
+const lowdb = require('lowdb')
 
 const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) (.*)$/i
 const REGISTER_REGEX = /^<(.*)\/register\/(.*)>$/
@@ -33,7 +34,7 @@ app.use(async function errorHandler (ctx, next) {
   }
 })
 // TODO store passwords in a better way
-app.context.credentialsStore = {}
+app.context.db = lowdb(process.env.DB_URL || './db.json')
 app.use(verify(slackVerificationToken))
 app.use(route.post('/payto/send', sendHandler))
 app.use(route.post('/payto/register', registerHandler))
@@ -53,7 +54,7 @@ function verify (token) {
 async function sendHandler (ctx, next) {
   const body = ctx.request.body
 
-  const credentials = ctx.credentialsStore[body.user_id]
+  const credentials = ctx.db.get(body.user_id).value()
   if (!credentials) {
     return request.post(body.response_url)
       .send({
@@ -87,6 +88,7 @@ async function sendHandler (ctx, next) {
     return ctx.throw(422, `uh oh! it looks like @${params.name} doesn't have their SPSP Address sent in their profile`)
   }
 
+  ctx.status = 200
   ctx.body = {
     response_type: 'ephemeral',
     text: 'Sending payment...'
@@ -102,8 +104,7 @@ async function sendHandler (ctx, next) {
       credentials
     })
   } catch (err) {
-    console.log('error sending payment', err)
-    return sendError(body.response_url, 'Error: ' + err.message)
+    return sendError(body.response_url, err.message)
   }
 
   // TODO post in the channel for successful payments
@@ -113,10 +114,11 @@ async function sendHandler (ctx, next) {
     })
 }
 
-
 async function registerHandler (ctx, next) {
   const body = ctx.request.body
   console.log('register got body', body)
+
+  // TODO don't re-register if they already have an account with us
 
   let ilpKitHost
   let inviteCode
@@ -131,11 +133,16 @@ async function registerHandler (ctx, next) {
   }
 
   // Respond to the user before we actually try creating the account because it might take too long
+  ctx.status = 200
   ctx.body = {
     response_type: 'ephemeral',
     text: 'Registering...'
   }
   await next()
+
+  // Determine the account credentials
+  const username = ('payto-' + body.user_name + '-' + crypto.randomBytes(4).toString('hex')).slice(0,21)
+  const password = crypto.randomBytes(12).toString('base64')
 
   // Get their email
   let email
@@ -146,10 +153,6 @@ async function registerHandler (ctx, next) {
   } catch (err) {
     return sendError(body.response_url, 'Error: could not get your email address from your Slack profile')
   }
-
-  // Determine the account credentials
-  const username = 'payto-' + body.user_name.slice(0,15) //+ '-' + crypto.randomBytes(4).toString('hex')
-  const password = crypto.randomBytes(12).toString('base64')
 
   // Try registering the account
   let balance
@@ -167,14 +170,15 @@ async function registerHandler (ctx, next) {
     // TODO add profile picture from slack?
   } catch (err) {
     console.log(`error registering user ${username} on ilp kit ${ilpKitHost}`, err.statusCode, err.body || err)
-    return sendError(body.response_url, `Error registering user ${username} on ${ilpKitHost}: ${err.message}`)
+    return sendError(body.response_url, `Error registering user ${username} on ${ilpKitHost}: ${err.body && err.body.message || err.message}`)
   }
 
-  ctx.credentialsStore[body.user_id] = {
+  ctx.db.set(body.user_id, {
     ilpKitHost,
     username,
     password
-  }
+  })
+  .write()
 
   console.log(`created account ${accountUrl}, balance is ${balance}`)
 
@@ -213,7 +217,7 @@ async function getUserInfo (id) {
 }
 
 async function sendPayment ({ spspAddress, amount, message, credentials }) {
-  console.log(`send SPSP payment for ${amount} to ${spspAddress} with message: "${message}" using credentials:`, credentials)
+  console.log(`send SPSP payment for ${amount} to ${spspAddress} with message: "${message}" from ${credentials.username} on ${credentials.ilpKitHost}`)
 
   const quoteUrl = (new URL('/api/payments/quote', credentials.ilpKitHost)).toString()
   let quote
@@ -227,8 +231,8 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
     quote = quoteResult.body
     console.log('got quote:', quote.sourceAmount)
   } catch (err) {
-    console.log('error getting quote', err.statusCode, err.body)
-    throw new Error('could not get quote :white_frowning_face:')
+    console.log('error getting quote', err.statusCode, err.body || err)
+    throw new Error('Oh no, I couldn\'t get a quote! :zipper_mouth_face:')
   }
 
   // TODO confirm quote with user
@@ -244,7 +248,7 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
 
   } catch (err) {
     console.log('error sending payment', err.statusCode, err.body || err)
-    throw new Error('something went wrong while sending the payment')
+    throw new Error('Eek, I tried, I tried, but the payment just wouldn\'t go through! :cold_sweat:')
   }
 
   return {
