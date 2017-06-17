@@ -9,7 +9,7 @@ const crypto = require('crypto')
 const redis = require('redis')
 const util = require('util')
 
-const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) (.*)?$/i
+const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) ?(.*)?$/i
 const REGISTER_REGEX = /^<(.*)\/register\/(.*)>$/
 const SPSP_FIELD_REGEX = /spsp address/gi
 const USER_INFO_URL = 'https://slack.com/api/users.profile.get'
@@ -107,8 +107,7 @@ async function sendHandler (ctx, next) {
 
   ctx.status = 200
   ctx.body = {
-    response_type: 'ephemeral',
-    text: 'Sending payment...'
+    text: `Paying ${params.amount} to @${params.name} (${spspAddress})...`
   }
   await next()
 
@@ -117,10 +116,16 @@ async function sendHandler (ctx, next) {
     amount: params.amount,
     message: params.message,
     credentials
-  }).then(({ sourceAmount }) => {
+  }).then(({ sourceAmount, sourceAddress }) => {
+    // TODO add a button to hide the extra details
+    const text = `Citizens! <@${body.user_id}|${body.user_name}> just sent <@${params.id}|${params.name}> \`${params.amount}\` over ILP! :money_with_wings:
+
+> Sender \`${sourceAddress}\` sent \`${sourceAmount}\`
+> Receiver \`${spspAddress}\` received \`${params.amount}\``
     return request.post(body.response_url)
       .send({
-        text: `Sent! (source amount: ${sourceAmount}) :money_with_wings:`
+        response_type: 'in_channel',
+        text
       })
     // TODO post in the channel for successful payments
   }).catch(sendError.bind(null, body.response_url))
@@ -147,8 +152,7 @@ async function registerHandler (ctx, next) {
   // Respond to the user before we actually try creating the account because it might take too long
   ctx.status = 200
   ctx.body = {
-    response_type: 'ephemeral',
-    text: 'Registering...'
+    text: 'Creating account and claiming invite code...'
   }
   await next()
 
@@ -217,10 +221,13 @@ async function createAccount ({ ilpKitHost, inviteCode, body }) {
   }
 }
 
-async function sendError (url, text) {
+async function sendError (url, err) {
+  console.log('got error', err)
+  const text = typeof err === 'string'
+    ? err
+    : err.message
   return request.post(url)
     .send({
-      response_type: 'ephemeral',
       text: text
     })
 }
@@ -288,7 +295,8 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
   }
 
   return {
-    sourceAmount: quote.sourceAmount
+    sourceAmount: quote.sourceAmount,
+    sourceAddress: credentials.username + '@' + (new URL(credentials.ilpKitHost)).host
   }
 
 }
