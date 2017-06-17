@@ -6,8 +6,8 @@ const bodyparser = require('koa-bodyparser')
 const route = require('koa-route')
 const { URL } = require('url')
 const crypto = require('crypto')
-// TODO use a better db
-const lowdb = require('lowdb')
+const redis = require('redis')
+const util = require('util')
 
 const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) (.*)?$/i
 const REGISTER_REGEX = /^<(.*)\/register\/(.*)>$/
@@ -35,8 +35,8 @@ app.use(async function errorHandler (ctx, next) {
     throw err
   }
 })
-// TODO store passwords in a better way
-app.context.db = lowdb(process.env.DB_URL || './db.json')
+app.context.db = redis.createClient(process.env.REDIS_URL)
+app.context.db.on('error', (err) => console.log('redis error', err))
 app.use(route.get('/', async function (ctx, next) {
   ctx.body = 'Hello, this is the Payto Slackbot server'
 }))
@@ -59,7 +59,7 @@ function verify (token) {
 async function sendHandler (ctx, next) {
   const body = ctx.request.body
 
-  const credentials = ctx.db.get(body.user_id).value()
+  const credentials = await util.promisify(ctx.db.hgetall).bind(ctx.db)(body.user_id)
   if (!credentials) {
     return request.post(body.response_url)
       .send({
@@ -193,12 +193,11 @@ async function registerHandler (ctx, next) {
     return sendError(body.response_url, `Error registering user ${username} on ${ilpKitHost}: ${err.body && err.body.message || err.message}`)
   }
 
-  ctx.db.set(body.user_id, {
+  await util.promisify(ctx.db.hmset).bind(ctx.db)(body.user_id, {
     ilpKitHost,
     username,
     password
   })
-  .write()
 
   console.log(`created account ${accountUrl}, balance is ${balance}`)
 
