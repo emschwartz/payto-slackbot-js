@@ -112,23 +112,18 @@ async function sendHandler (ctx, next) {
   }
   await next()
 
-  let paymentResult
-  try {
-    paymentResult = await sendPayment({
-      spspAddress,
-      amount: params.amount,
-      message: params.message,
-      credentials
-    })
-  } catch (err) {
-    return sendError(body.response_url, err.message)
-  }
-
-  // TODO post in the channel for successful payments
-  const result = await request.post(body.response_url)
-    .send({
-      text: `Sent! (source amount: ${paymentResult.sourceAmount}) :money_with_wings:`
-    })
+  sendPayment({
+    spspAddress,
+    amount: params.amount,
+    message: params.message,
+    credentials
+  }).then(({ sourceAmount }) => {
+    return request.post(body.response_url)
+      .send({
+        text: `Sent! (source amount: ${sourceAmount}) :money_with_wings:`
+      })
+    // TODO post in the channel for successful payments
+  }).catch(sendError.bind(null, body.response_url))
 }
 
 async function registerHandler (ctx, next) {
@@ -157,6 +152,22 @@ async function registerHandler (ctx, next) {
   }
   await next()
 
+  // Don't await this because we should respond to the user immediately and then try to register
+  createAccount({
+    ilpKitHost,
+    inviteCode,
+    body
+  }).then(({ accountUrl, balance }) => {
+    return request.post(body.response_url)
+      .send({
+        text: `Registered user \`${accountUrl}\` with invite code, balance is ${balance}`
+        // TODO include SPSP address to pay to fund account more
+      })
+  }).catch(sendError.bind(null, body.response_url))
+
+}
+
+async function createAccount ({ ilpKitHost, inviteCode, body }) {
   // Determine the account credentials
   const username = ('payto-' + body.user_name + '-' + crypto.randomBytes(4).toString('hex')).slice(0,21)
   const password = crypto.randomBytes(12).toString('base64')
@@ -170,7 +181,7 @@ async function registerHandler (ctx, next) {
     email = userEmail.replace('@', '+' + username + '@')
     fullName = user.profile.first_name + ' ' + user.profile.last_name
   } catch (err) {
-    return sendError(body.response_url, 'Error: could not get your email address from your Slack profile')
+    throw new Error('Error: could not get your email address from your Slack profile')
   }
 
   // Try registering the account
@@ -190,7 +201,7 @@ async function registerHandler (ctx, next) {
     // TODO add profile picture from slack?
   } catch (err) {
     console.log(`error registering user ${username} on ilp kit ${ilpKitHost}`, err.statusCode, err.body || err)
-    return sendError(body.response_url, `Error registering user ${username} on ${ilpKitHost}: ${err.body && err.body.message || err.message}`)
+    throw new Error(`Error registering user ${username} on ${ilpKitHost}: ${err.body && err.body.message || err.message}`)
   }
 
   await util.promisify(ctx.db.hmset).bind(ctx.db)(body.user_id, {
@@ -200,15 +211,9 @@ async function registerHandler (ctx, next) {
   })
 
   console.log(`created account ${accountUrl}, balance is ${balance}`)
-
-  try {
-    return request.post(body.response_url)
-      .send({
-        text: `Registered user ${username} on ${ilpKitHost} with invite code, balance is ${balance}`
-        // TODO include SPSP address to pay to fund account more
-      })
-  } catch (err) {
-    console.log(err)
+  return {
+    accountUrl,
+    balance
   }
 }
 
