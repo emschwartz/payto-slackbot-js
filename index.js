@@ -255,8 +255,19 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
     console.log('error getting quote', err.status, err.response && err.response.body || err)
     throw new Error('Oh no, I couldn\'t get a quote! :zipper_mouth_face:')
   }
-
   // TODO confirm quote with user
+
+  // Get destination details
+  const detailsUrl = (new URL('/api/parse/destination?destination=' + encodeURI(spspAddress), credentials.ilpKitHost)).toString()
+  let destinationDetails
+  try {
+    const detailsResult = await request.get(detailsUrl)
+      .auth(credentials.username, credentials.password)
+    destinationDetails = detailsResult.body
+  } catch (err) {
+    console.log('error getting destination details', err.status, err.response && err.response.body || err)
+    throw new Error('Uh oh, I couldn\'t get the details for that user\'s SPSP Address')
+  }
 
   const paymentUrl = (new URL('/api/payments/' + quote.id, credentials.ilpKitHost)).toString()
   try {
@@ -264,9 +275,9 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
       .auth(credentials.username, credentials.password)
       .send({
         quote,
-        message
+        message,
+        destination: destinationDetails
       })
-
   } catch (err) {
     console.log('error sending payment', err.status, err.response && err.response.body || err)
     throw new Error('Eek, I tried, I tried, but the payment just wouldn\'t go through! :cold_sweat:')
