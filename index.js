@@ -27,7 +27,7 @@ app.use(async function errorHandler (ctx, next) {
     await next()
   } catch (err) {
     if (err.statusCode && err.statusCode >= 300) {
-      console.log('Error: status=' + err.statusCode, err.error)
+      console.log('Error: status=' + err.statusCode, err.error || err.body || err.response && err.response.body || err)
     } else {
       console.log(err)
     }
@@ -37,6 +37,9 @@ app.use(async function errorHandler (ctx, next) {
 })
 // TODO store passwords in a better way
 app.context.db = lowdb(process.env.DB_URL || './db.json')
+app.use(route.get('/', async function (ctx, next) {
+  ctx.body = 'Hello, this is the Payto Slackbot server'
+}))
 app.use(verify(slackVerificationToken))
 app.use(route.post('/send', sendHandler))
 app.use(route.post('/register', registerHandler))
