@@ -39,8 +39,8 @@ app.use(async function errorHandler (ctx, next) {
 // TODO store passwords in a better way
 app.context.db = lowdb(process.env.DB_URL || './db.json')
 app.use(verify(slackVerificationToken))
-app.use(route.post('/payto/send', sendHandler))
-app.use(route.post('/payto/register', registerHandler))
+app.use(route.post('/send', sendHandler))
+app.use(route.post('/register', registerHandler))
 
 function verify (token) {
   return async function verify (ctx, next) {
