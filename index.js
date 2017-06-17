@@ -63,7 +63,7 @@ async function sendHandler (ctx, next) {
   if (!credentials) {
     return request.post(body.response_url)
       .send({
-        text: 'Sorry, you need to register first before you can send payments!'
+        text: 'My apologies, but did you not know that you must register first (with \`/payto-register\`) before you can send payments!'
       })
   }
 
@@ -102,7 +102,7 @@ async function sendHandler (ctx, next) {
       fromUserId: body.user_id,
       fromUsername: body.user_name
     })
-    return ctx.throw(422, `uh oh! it looks like @${params.name} doesn't have their SPSP Address sent in their profile`, { expose: true })
+    return ctx.throw(422, `A travesty! It looks like @${params.name} does not have their SPSP Address in their profile`, { expose: true })
   }
 
   ctx.status = 200
@@ -118,7 +118,9 @@ async function sendHandler (ctx, next) {
     credentials
   }).then(({ sourceAmount, sourceAddress }) => {
     // TODO add a button to hide the extra details
-    const text = `Citizens! <@${body.user_id}|${body.user_name}> just sent <@${params.id}|${params.name}> \`${params.amount}\` over ILP! :money_with_wings:
+    const text = `*Socrates - <@${body.user_id}|${body.user_name}> - <@${params.id}|${params.name}>*
+
+I say! <@${params.id}|${params.name}>, have you heard? <@${body.user_id}|${body.user_name}> just sent you ${params.amount} over the Interledger! :money_with_wings:
 
 > Sender \`${sourceAddress}\` sent \`${sourceAmount}\`
 > Receiver \`${spspAddress}\` received \`${params.amount}\``
@@ -127,7 +129,6 @@ async function sendHandler (ctx, next) {
         response_type: 'in_channel',
         text
       })
-    // TODO post in the channel for successful payments
   }).catch(sendError.bind(null, body.response_url))
 }
 
@@ -173,7 +174,7 @@ async function registerHandler (ctx, next) {
 
 async function createAccount ({ ilpKitHost, inviteCode, body }) {
   // Determine the account credentials
-  const username = ('payto-' + body.user_name + '-' + crypto.randomBytes(4).toString('hex')).slice(0,21)
+  const username = ('payto-' + body.user_name).slice(0,21)
   const password = crypto.randomBytes(12).toString('base64')
 
   // Get their email
@@ -189,6 +190,7 @@ async function createAccount ({ ilpKitHost, inviteCode, body }) {
   }
 
   // Try registering the account
+  // TODO change username if first attempt fails
   let balance
   let accountUrl
   try {
@@ -264,7 +266,7 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
     console.log('got quote:', quote.sourceAmount)
   } catch (err) {
     console.log('error getting quote', err.status, err.response && err.response.body || err)
-    throw new Error('Oh no, I couldn\'t get a quote! :zipper_mouth_face:')
+    throw new Error('I fear I could not obtain a quote... :zipper_mouth_face:')
   }
   // TODO confirm quote with user
 
@@ -291,7 +293,7 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
       })
   } catch (err) {
     console.log('error sending payment', err.status, err.response && err.response.body || err)
-    throw new Error('Eek, I tried, I tried, but the payment just wouldn\'t go through! :cold_sweat:')
+    throw new Error('I dare say I have tried, but I was unable to send the payment... :cold_sweat:')
   }
 
   return {
@@ -318,13 +320,19 @@ async function sendSignupMessage ({ toUserId, toUsername, fromUserId, fromUserna
         channel: '@' + toUsername,
         as_user: false,
         username: 'Payto (Philosopher Banker and ILP/SPSP Slackbot)',
-        text: `Citizen <@${toUserId}|${toUsername}>,
+        text: `*Socrates - <@${toUserId}|${toUsername}>*
 
-Your fellow citizen, <@${fromUserId}|${fromUsername}>, has attempted to send you money but you have failed to include your <https://${teamDomain}.slack.com/team/${toUsername}|SPSP Address in your Slack Profile>.
+I heard from <@${fromUserId}|${fromUsername}> that they have tried to reward you for your wise and courageous deeds.
 
-If you your SPSP Address to your profile, other members of the Republic of ${teamName} will be able to reward you for your courageous deeds by typing \`/payto\` in Slack! :money_with_wings:
+However, you have not written your SPSP Address into the book of Slack.
 
-You can also call upon my knowledge of the Interledger paths wtih \`/payto-register\`.
+Could it be that someone as learned as you has not heard of the :sparkles: Interledger :sparkles:?
+
+I trust this is not the case. You must make haste and inscribe your <https://${teamDomain}.slack.com/team/${toUsername}|SPSP Address in your Slack Profile> so that other citizens of the Republic of ${teamName} may address you properly (and pay you by typing \`/payto\` in Slack).
+
+I dare say that you should also try calling upon my knowledge of the Interledger paths yourself (by typing \`/payto-register\`)!
+
+For now, that is all. But I will leave you with a few more words of wisdom:
 
 
 > _${getPaytoQuote()}_
@@ -340,7 +348,6 @@ function getPaytoQuote () {
   const quotes = [
     'We can easily forgive a banker who is afraid of Interledger; the real tragedy of life is when developers are afraid of the IoV.',
     'Interledger payments are their own reward.',
-    'The first and best victory is to conquer SWIFT.',
     'The penalty good developers pay for indifference to payment efficiency is to be ruled by uncompetitive networks.',
     'Man is a being in search of the Internet of Value.',
     'The measure of a man is what he does with Interledger.',
