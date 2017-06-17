@@ -12,7 +12,10 @@ const lowdb = require('lowdb')
 const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) (.*)$/i
 const REGISTER_REGEX = /^<(.*)\/register\/(.*)>$/
 const USER_INFO_URL = 'https://slack.com/api/users.profile.get'
+const POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage'
+const TEAM_INFO_URL = 'https://slack.com/api/team.info'
 
+// TODO get SPSP Address field from team profile
 const spspFieldId = process.env.SPSP_FIELD_ID
 const slackToken = process.env.SLACK_TOKEN
 const slackVerificationToken = process.env.SLACK_VERIFICATION_TOKEN
@@ -84,8 +87,13 @@ async function sendHandler (ctx, next) {
     const user = await getUserInfo(params.id)
     spspAddress = user.profile.fields[spspFieldId].value
   } catch (err) {
-    // TODO send a message to that user telling them someone tried to pay them but they need to set their SPSP Address
-    return ctx.throw(422, `uh oh! it looks like @${params.name} doesn't have their SPSP Address sent in their profile`)
+    await sendSignupMessage({
+      toUserId: params.id,
+      toUsername: params.name,
+      fromUserId: body.user_id,
+      fromUsername: body.user_name
+    })
+    return ctx.throw(422, `uh oh! it looks like @${params.name} doesn't have their SPSP Address sent in their profile`, { expose: true })
   }
 
   ctx.status = 200
@@ -255,6 +263,54 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
     sourceAmount: quote.sourceAmount
   }
 
+}
+
+async function sendSignupMessage ({ toUserId, toUsername, fromUserId, fromUsername }) {
+  try {
+    const teamInfoResult = await request.post(TEAM_INFO_URL)
+      .type('form')
+      .send({
+        token: slackToken
+      })
+    const teamName = teamInfoResult.body.team.name
+    const teamDomain = teamInfoResult.body.team.domain
+
+    await request.post(POST_MESSAGE_URL)
+      .type('form')
+      .send({
+        token: slackToken,
+        channel: '@' + toUsername,
+        as_user: false,
+        username: 'Payto (Philosopher Banker and ILP/SPSP Slackbot)',
+        text: `Citizen <@${toUserId}|${toUsername}>,
+
+Your fellow citizen, <@${fromUserId}|${fromUsername}>, has attempted to send you money but you have failed to include your <https://${teamDomain}.slack.com/team/${toUsername}|SPSP Address in your Slack Profile>.
+
+If you your SPSP Address to your profile, other members of the Republic of ${teamName} will be able to reward you for your courageous deeds by typing \`/payto\` in Slack! :money_with_wings:
+
+You can also call upon my knowledge of the Interledger paths wtih \`/payto-register\`.
+
+
+> _${getPaytoQuote()}_
+> - Payto`
+      })
+    console.log(`sent signup message to @${toUsername}`)
+  } catch (err) {
+    console.log(`error sending signup message to @${toUsername}`, err)
+  }
+}
+
+function getPaytoQuote () {
+  const quotes = [
+    'We can easily forgive a banker who is afraid of Interledger; the real tragedy of life is when developers are afraid of the IoV.',
+    'Interledger payments are their own reward.',
+    'The first and best victory is to conquer SWIFT.',
+    'The penalty good developers pay for indifference to payment efficiency is to be ruled by uncompetitive networks.',
+    'Man is a being in search of the Internet of Value.',
+    'The measure of a man is what he does with Interledger.',
+    'The greatest wealth is to live streaming content with little Interledger payments.'
+  ]
+  return quotes[Math.floor(Math.random() * quotes.length)]
 }
 
 console.log('listening on port: ' + port)
