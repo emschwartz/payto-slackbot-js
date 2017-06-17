@@ -9,14 +9,13 @@ const crypto = require('crypto')
 // TODO use a better db
 const lowdb = require('lowdb')
 
-const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) (.*)$/i
+const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) (.*)?$/i
 const REGISTER_REGEX = /^<(.*)\/register\/(.*)>$/
+const SPSP_FIELD_REGEX = /spsp address/gi
 const USER_INFO_URL = 'https://slack.com/api/users.profile.get'
 const POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage'
 const TEAM_INFO_URL = 'https://slack.com/api/team.info'
 
-// TODO get SPSP Address field from team profile
-const spspFieldId = process.env.SPSP_FIELD_ID
 const slackToken = process.env.SLACK_TOKEN
 const slackVerificationToken = process.env.SLACK_VERIFICATION_TOKEN
 const port = process.env.PORT || 3000
@@ -85,7 +84,14 @@ async function sendHandler (ctx, next) {
   let spspAddress
   try {
     const user = await getUserInfo(params.id)
-    spspAddress = user.profile.fields[spspFieldId].value
+    for (let field of Object.keys(user.profile.fields)) {
+      if (user.profile.fields[field].label.match(SPSP_FIELD_REGEX)) {
+        spspAddress = user.profile.fields[field].value
+      }
+    }
+    if (!spspAddress) {
+      throw new Error('could not find SPSP Address field in profile')
+    }
   } catch (err) {
     await sendSignupMessage({
       toUserId: params.id,
@@ -154,10 +160,12 @@ async function registerHandler (ctx, next) {
 
   // Get their email
   let email
+  let fullName
   try {
     const user = await getUserInfo(body.user_id)
     const userEmail = user.profile.email || 'blah@example.com'
     email = userEmail.replace('@', '+' + username + '@')
+    fullName = user.profile.first_name + ' ' + user.profile.last_name
   } catch (err) {
     return sendError(body.response_url, 'Error: could not get your email address from your Slack profile')
   }
@@ -172,7 +180,8 @@ async function registerHandler (ctx, next) {
       .send({
         password,
         inviteCode,
-        email
+        email,
+        name: fullName
       })
     balance = registerResult.body.balance
     // TODO add profile picture from slack?
@@ -215,7 +224,8 @@ async function getUserInfo (id) {
       .type('form')
       .send({
         token: slackToken,
-        user: id
+        user: id,
+        include_labels: true
       })
     return result.body
   } catch (err) {
@@ -239,7 +249,7 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
     quote = quoteResult.body
     console.log('got quote:', quote.sourceAmount)
   } catch (err) {
-    console.log('error getting quote', err.statusCode, err.body || err)
+    console.log('error getting quote', err.status, err.response && err.response.body || err)
     throw new Error('Oh no, I couldn\'t get a quote! :zipper_mouth_face:')
   }
 
@@ -255,7 +265,7 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
       })
 
   } catch (err) {
-    console.log('error sending payment', err.statusCode, err.body || err)
+    console.log('error sending payment', err.status, err.response && err.response.body || err)
     throw new Error('Eek, I tried, I tried, but the payment just wouldn\'t go through! :cold_sweat:')
   }
 
