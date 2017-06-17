@@ -28,6 +28,7 @@ app.use(async function errorHandler (ctx, next) {
     } else {
       console.log(err)
     }
+    err.expose = true
     throw err
   }
 })
@@ -43,9 +44,7 @@ function verify (token) {
     if (body.token !== token) {
       console.log('got invalid request: ', body)
       const err = new Error('invalid token')
-      err.status = 403
-      err.expose = true
-      throw err
+      return ctx.throw(403, 'invalid verification token', { expose: true })
     }
     return next()
   }
@@ -63,7 +62,6 @@ async function sendHandler (ctx, next) {
   }
 
   let params
-  let spspAddress
   try {
     const match = SEND_REGEX.exec(body.text)
     if (!match) {
@@ -76,14 +74,24 @@ async function sendHandler (ctx, next) {
       message: match[4]
     }
     console.log(`got request from @${body.user_name} to send payment with params:`, params)
+  } catch (err) {
+    return ctx.throw(400, err.message, { expose: true })
+  }
+
+  let spspAddress
+  try {
     const user = await getUserInfo(params.id)
     spspAddress = user.profile.fields[spspFieldId].value
   } catch (err) {
-    console.log(err)
-    err.expose = true
-    err.status = 422
-    throw err
+    // TODO send a message to that user telling them someone tried to pay them but they need to set their SPSP Address
+    return ctx.throw(422, `uh oh! it looks like @${params.name} doesn't have their SPSP Address sent in their profile`)
   }
+
+  ctx.body = {
+    response_type: 'ephemeral',
+    text: 'Sending payment...'
+  }
+  await next()
 
   let paymentResult
   try {
@@ -95,17 +103,16 @@ async function sendHandler (ctx, next) {
     })
   } catch (err) {
     console.log('error sending payment', err)
-    return request.post(body.response_url)
-      .send({
-        text: 'Error: ' + err.message
-      })
+    return sendError(body.response_url, 'Error: ' + err.message)
   }
 
+  // TODO post in the channel for successful payments
   const result = await request.post(body.response_url)
     .send({
-      text: `Sent! (source amount: ${paymentResult.sourceAmount})`
+      text: `Sent! (source amount: ${paymentResult.sourceAmount}) :money_with_wings:`
     })
 }
+
 
 async function registerHandler (ctx, next) {
   const body = ctx.request.body
@@ -113,26 +120,38 @@ async function registerHandler (ctx, next) {
 
   let ilpKitHost
   let inviteCode
-  let userEmail
   try {
     const match = REGISTER_REGEX.exec(body.text)
     ilpKitHost = match[1]
     inviteCode = match[2]
 
-    const user = await getUserInfo(body.user_id)
-    userEmail = user.profile.email || 'blah@example.com'
   } catch (err) {
     console.log('got invalid registration request', body)
-    return request.post(body.response_url)
-      .send({
-        text: 'Error: registration request must include invite code URL from an ILP Kit'
-      })
+    return ctx.throw(422, 'registration request must include ILP Kit invite code URL', { expose: true })
   }
 
+  // Respond to the user before we actually try creating the account because it might take too long
+  ctx.body = {
+    response_type: 'ephemeral',
+    text: 'Registering...'
+  }
+  await next()
+
+  // Get their email
+  let email
+  try {
+    const user = await getUserInfo(body.user_id)
+    const userEmail = user.profile.email || 'blah@example.com'
+    email = userEmail.replace('@', '+' + username + '@')
+  } catch (err) {
+    return sendError(body.response_url, 'Error: could not get your email address from your Slack profile')
+  }
+
+  // Determine the account credentials
   const username = 'payto-' + body.user_name.slice(0,15) //+ '-' + crypto.randomBytes(4).toString('hex')
   const password = crypto.randomBytes(12).toString('base64')
-  const email = userEmail.replace('@', '+' + username + '@')
 
+  // Try registering the account
   let balance
   let accountUrl
   try {
@@ -148,10 +167,7 @@ async function registerHandler (ctx, next) {
     // TODO add profile picture from slack?
   } catch (err) {
     console.log(`error registering user ${username} on ilp kit ${ilpKitHost}`, err.statusCode, err.body || err)
-    return request.post(body.response_url)
-      .send({
-        text: `Error registering user ${username} on ${ilpKitHost}: ${err.message}`
-      })
+    return sendError(body.response_url, `Error registering user ${username} on ${ilpKitHost}: ${err.message}`)
   }
 
   ctx.credentialsStore[body.user_id] = {
@@ -162,7 +178,6 @@ async function registerHandler (ctx, next) {
 
   console.log(`created account ${accountUrl}, balance is ${balance}`)
 
-  // TODO respond to request faster so that we don't end up with two messages
   try {
     return request.post(body.response_url)
       .send({
@@ -172,6 +187,14 @@ async function registerHandler (ctx, next) {
   } catch (err) {
     console.log(err)
   }
+}
+
+async function sendError (url, text) {
+  return request.post(url)
+    .send({
+      response_type: 'ephemeral',
+      text: text
+    })
 }
 
 async function getUserInfo (id) {
@@ -205,7 +228,7 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
     console.log('got quote:', quote.sourceAmount)
   } catch (err) {
     console.log('error getting quote', err.statusCode, err.body)
-    throw new Error('could not get quote')
+    throw new Error('could not get quote :white_frowning_face:')
   }
 
   // TODO confirm quote with user
