@@ -10,7 +10,7 @@ const redis = require('redis')
 const util = require('util')
 
 const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) ?(.*)?$/i
-const REGISTER_REGEX = /^<(.*)\/register\/(.*)>$/
+const REGISTER_REGEX = /^(\S+)@(\S+) (\S+)$/i
 const SPSP_FIELD_REGEX = /spsp address/gi
 const USER_INFO_URL = 'https://slack.com/api/users.profile.get'
 const POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage'
@@ -138,76 +138,17 @@ async function registerHandler (ctx, next) {
 
   // TODO don't re-register if they already have an account with us
 
+  let username
+  let password
   let ilpKitHost
-  let inviteCode
   try {
     const match = REGISTER_REGEX.exec(body.text)
-    ilpKitHost = match[1]
-    inviteCode = match[2]
-
+    username = match[1]
+    ilpKitHost = match[2]
+    password = match[3]
   } catch (err) {
     console.log('got invalid registration request', body)
-    return ctx.throw(422, 'registration request must include ILP Kit invite code URL', { expose: true })
-  }
-
-  // Respond to the user before we actually try creating the account because it might take too long
-  ctx.status = 200
-  ctx.body = {
-    text: 'Creating account and claiming invite code...'
-  }
-  await next()
-
-  // Don't await this because we should respond to the user immediately and then try to register
-  createAccount({
-    ilpKitHost,
-    inviteCode,
-    body
-  }).then(({ accountUrl, balance }) => {
-    return request.post(body.response_url)
-      .send({
-        text: `Registered user \`${accountUrl}\` with invite code, balance is ${balance}`
-        // TODO include SPSP address to pay to fund account more
-      })
-  }).catch(sendError.bind(null, body.response_url))
-
-}
-
-async function createAccount ({ ilpKitHost, inviteCode, body }) {
-  // Determine the account credentials
-  const username = ('payto-' + body.user_name).slice(0,21)
-  const password = crypto.randomBytes(12).toString('base64')
-
-  // Get their email
-  let email
-  let fullName
-  try {
-    const user = await getUserInfo(body.user_id)
-    const userEmail = user.profile.email || 'blah@example.com'
-    email = userEmail.replace('@', '+' + username + '@')
-    fullName = user.profile.first_name + ' ' + user.profile.last_name
-  } catch (err) {
-    throw new Error('Error: could not get your email address from your Slack profile')
-  }
-
-  // Try registering the account
-  // TODO change username if first attempt fails
-  let balance
-  let accountUrl
-  try {
-    accountUrl = (new URL(`/api/users/${username}`, ilpKitHost)).toString()
-    console.log(`attempting to register account: ${accountUrl} with invite code: ${inviteCode} email: ${email}`)
-    const registerResult = await request.post(accountUrl)
-      .send({
-        password,
-        inviteCode,
-        email,
-        name: fullName
-      })
-    balance = registerResult.body.balance
-    // TODO add profile picture from slack?
-  } catch (err) {
-    console.log(`error registering user ${username} on ilp kit ${ilpKitHost}`, err.statusCode, err.body || err)
-    throw new Error(`Error registering user ${username} on ${ilpKitHost}: ${err.body && err.body.message || err.message}`)
+    return ctx.throw(422, 'registration request must include SPSP Address and password', { expose: true })
   }
 
   await util.promisify(ctx.db.hmset).bind(ctx.db)(body.user_id, {
@@ -216,10 +157,10 @@ async function createAccount ({ ilpKitHost, inviteCode, body }) {
     password
   })
 
-  console.log(`created account ${accountUrl}, balance is ${balance}`)
-  return {
-    accountUrl,
-    balance
+  // Respond to the user before we actually try creating the account because it might take too long
+  ctx.status = 200
+  ctx.body = {
+    text: 'Registered'
   }
 }
 
