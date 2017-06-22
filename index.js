@@ -163,6 +163,22 @@ I've sent them a message to suggest they add it, but you might want to give them
         response_type: 'in_channel',
         text
       })
+  }).then(() => {
+    // TODO add button to send thank you back to sender
+    let text = `You just got paid ${params.amount} by @${body.user_name}!`
+    if (params.message) {
+      text += ` They said:
+> ${params.message.replace('\n', '\n> ')}`
+    }
+    return request.post(POST_MESSAGE_URL)
+      .type('form')
+      .send({
+        token: slackToken,
+        channel: '@' + params.name,
+        as_user: false,
+        username: 'Payto (Philosopher Banker and ILP/SPSP Slackbot)',
+        text
+      })
   }).catch(sendError.bind(null, body.response_url))
 }
 
