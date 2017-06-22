@@ -10,11 +10,11 @@ const redis = require('redis')
 const util = require('util')
 
 const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) ?(.*)?$/i
-const REGISTER_REGEX = /^(\S+)@(\S+) (\S+)$/i
+const REGISTER_REGEX = /register (\S+)@(\S+) (\S+)$/i
+const REGISTER_ESCAPED_REGEX = /register .*<mailto:.*\|(\S+?)@(\S+?)\> (\S+)$/
 const SPSP_FIELD_REGEX = /spsp address/gi
 const USER_INFO_URL = 'https://slack.com/api/users.profile.get'
 const POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage'
-const TEAM_INFO_URL = 'https://slack.com/api/team.info'
 
 const slackToken = process.env.SLACK_TOKEN
 const slackVerificationToken = process.env.SLACK_VERIFICATION_TOKEN
@@ -41,8 +41,7 @@ app.use(route.get('/', async function (ctx, next) {
   ctx.body = 'Hello, this is the Payto Slackbot server'
 }))
 app.use(verify(slackVerificationToken))
-app.use(route.post('/send', sendHandler))
-app.use(route.post('/register', registerHandler))
+app.use(route.post('/', requestHandler))
 
 function verify (token) {
   return async function verify (ctx, next) {
@@ -56,15 +55,44 @@ function verify (token) {
   }
 }
 
+async function requestHandler (ctx, next) {
+  const body = ctx.request.body
+
+  if (SEND_REGEX.test(body.text)) {
+    await sendHandler(ctx, next)
+  } else if (REGISTER_ESCAPED_REGEX.test(body.text)) {
+    // TODO just use a regex that can handle escaped and unescaped SPSP addresses
+    const match = REGISTER_ESCAPED_REGEX.exec(body.text)
+    const username = match[1]
+    const host = match[2]
+    const password = match [3]
+    ctx.request.body.text = `register ${username}@${host} ${password}`
+    await registerHandler(ctx, next)
+  } else if (REGISTER_REGEX.test(body.text)) {
+    await registerHandler(ctx, next)
+  } else {
+    await sendHelpMessage (ctx, next)
+  }
+}
+
+async function sendHelpMessage (ctx, next) {
+  ctx.body = {
+    text: `Available commands:
+
+    - \`/payto register user@ilp-kit.example password\` - Register ILP Kit account to send payments
+    - \`/payto @user amount [optional message]\` - Send an ILP payment `
+  }
+}
+
 async function sendHandler (ctx, next) {
   const body = ctx.request.body
 
   const credentials = await util.promisify(ctx.db.hgetall).bind(ctx.db)(body.user_id)
   if (!credentials) {
-    return request.post(body.response_url)
-      .send({
-        text: 'My apologies, but did you not know that you must register first (with \`/payto-register\`) before you can send payments!'
-      })
+    ctx.body = {
+      text: 'You need to register an ILP kit account before you can send payments!'
+    }
+    return
   }
 
   let params
@@ -81,7 +109,11 @@ async function sendHandler (ctx, next) {
     }
     console.log(`got request from @${body.user_name} to send payment with params:`, params)
   } catch (err) {
-    return ctx.throw(400, err.message, { expose: true })
+    ctx.body = {
+      text: err.message
+    }
+    ctx.status = 400
+    return
   }
 
   let spspAddress
@@ -102,10 +134,14 @@ async function sendHandler (ctx, next) {
       fromUserId: body.user_id,
       fromUsername: body.user_name
     })
-    return ctx.throw(422, `A travesty! It looks like @${params.name} does not have their SPSP Address in their profile`, { expose: true })
+    ctx.body = {
+      text: `Uh oh! <@${params.id}|${params.name}> doesn't have their SPSP Address in their profile.
+
+I've sent them a message to suggest they add it, but you might want to give them a little nudge as well!`
+    }
+    return
   }
 
-  ctx.status = 200
   ctx.body = {
     text: `Paying ${params.amount} to @${params.name} (${spspAddress})...`
   }
@@ -118,9 +154,7 @@ async function sendHandler (ctx, next) {
     credentials
   }).then(({ sourceAmount, sourceAddress }) => {
     // TODO add a button to hide the extra details
-    const text = `*Socrates - <@${body.user_id}|${body.user_name}> - <@${params.id}|${params.name}>*
-
-I say! <@${params.id}|${params.name}>, have you heard? <@${body.user_id}|${body.user_name}> just sent you ${params.amount} over the Interledger! :money_with_wings:
+    const text = `<@${body.user_id}|${body.user_name}> sent an ILP payment to <@${params.id}|${params.name}> :money_with_wings:
 
 > Sender \`${sourceAddress}\` sent \`${sourceAmount}\`
 > Receiver \`${spspAddress}\` received \`${params.amount}\``
@@ -144,11 +178,16 @@ async function registerHandler (ctx, next) {
   try {
     const match = REGISTER_REGEX.exec(body.text)
     username = match[1]
-    ilpKitHost = match[2]
+    ilpKitHost = 'https://' + match[2]
     password = match[3]
   } catch (err) {
     console.log('got invalid registration request', body)
-    return ctx.throw(422, 'registration request must include SPSP Address and password', { expose: true })
+    ctx.body = {
+
+      text: 'You need to give your SPSP Address and password to register'
+    }
+    ctx.status = 400
+    return
   }
 
   await util.promisify(ctx.db.hmset).bind(ctx.db)(body.user_id, {
@@ -160,7 +199,9 @@ async function registerHandler (ctx, next) {
   // Respond to the user before we actually try creating the account because it might take too long
   ctx.status = 200
   ctx.body = {
-    text: 'Registered'
+    text: `Registered. Now you can start sending payments just by typing:
+\`/payto @user amount [optional message]\``
+
   }
 }
 
@@ -207,7 +248,7 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
     console.log('got quote:', quote.sourceAmount)
   } catch (err) {
     console.log('error getting quote', err.status, err.response && err.response.body || err)
-    throw new Error('I fear I could not obtain a quote... :zipper_mouth_face:')
+    throw new Error('Eek! No quote found... :zipper_mouth_face:')
   }
   // TODO confirm quote with user
 
@@ -220,7 +261,7 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
     destinationDetails = detailsResult.body
   } catch (err) {
     console.log('error getting destination details', err.status, err.response && err.response.body || err)
-    throw new Error('Uh oh, I couldn\'t get the details for that user\'s SPSP Address')
+    throw new Error('Hmm, I couldn\'t get the details for that user\'s SPSP Address... :confused:')
   }
 
   const paymentUrl = (new URL('/api/payments/' + quote.id, credentials.ilpKitHost)).toString()
@@ -234,7 +275,7 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
       })
   } catch (err) {
     console.log('error sending payment', err.status, err.response && err.response.body || err)
-    throw new Error('I dare say I have tried, but I was unable to send the payment... :cold_sweat:')
+    throw new Error('Something went wrong while sending the payment :cold_sweat:')
   }
 
   return {
@@ -246,14 +287,6 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
 
 async function sendSignupMessage ({ toUserId, toUsername, fromUserId, fromUsername }) {
   try {
-    const teamInfoResult = await request.post(TEAM_INFO_URL)
-      .type('form')
-      .send({
-        token: slackToken
-      })
-    const teamName = teamInfoResult.body.team.name
-    const teamDomain = teamInfoResult.body.team.domain
-
     await request.post(POST_MESSAGE_URL)
       .type('form')
       .send({
@@ -261,19 +294,15 @@ async function sendSignupMessage ({ toUserId, toUsername, fromUserId, fromUserna
         channel: '@' + toUsername,
         as_user: false,
         username: 'Payto (Philosopher Banker and ILP/SPSP Slackbot)',
-        text: `*Socrates - <@${toUserId}|${toUsername}>*
+        text: `My good <@${toUserId}|${toUsername}>,
 
-I heard from <@${fromUserId}|${fromUsername}> that they have tried to reward you for your wise and courageous deeds.
+Socrates tells me that <@${fromUserId}|${fromUsername}> just tried to send you money via Interledger. However, you have not inscribed your SPSP Address in your Slack Profile!
 
-However, you have not written your SPSP Address into the book of Slack.
+If you add your SPSP Address, team members can pay you by typing:
+\`/payto <@${toUserId}|${toUsername}> 10 Here's some money!\`!
 
-Could it be that someone as learned as you has not heard of the :sparkles: Interledger :sparkles:?
-
-I trust this is not the case. You must make haste and inscribe your <https://${teamDomain}.slack.com/team/${toUsername}|SPSP Address in your Slack Profile> so that other citizens of the Republic of ${teamName} may address you properly (and pay you by typing \`/payto\` in Slack).
-
-I dare say that you should also try calling upon my knowledge of the Interledger paths yourself (by typing \`/payto-register\`)!
-
-For now, that is all. But I will leave you with a few more words of wisdom:
+You can register to use my knowledger of the Interledger paths with:
+\`/payto register ${toUserId}@your-ilp-kit.example your-password\`
 
 
 > _${getPaytoQuote()}_
