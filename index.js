@@ -10,8 +10,8 @@ const redis = require('redis')
 const util = require('util')
 
 const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) ?(.*)?$/i
-const REGISTER_REGEX = /register (\S+)@(\S+) (\S+)$/i
-const REGISTER_ESCAPED_REGEX = /register .*<mailto:.*\|(\S+?)@(\S+?)\> (\S+)$/
+const REGISTER_REGEX = /register (\S+)@(\S+) (.+)$/i
+const REGISTER_ESCAPED_REGEX = /register .*<mailto:.*\|(\S+?)@(\S+?)\> (.+)$/
 const SPSP_FIELD_REGEX = /spsp address/gi
 const USER_INFO_URL = 'https://slack.com/api/users.profile.get'
 const USER_PROFILE_SET_URL = 'https://slack.com/api/users.profile.set'
@@ -154,7 +154,7 @@ async function sendHandler (ctx, next) {
       fromUsername: body.user_name
     })
     ctx.body = {
-      text: `Uh oh! <@${params.id}|${params.name}> doesn't have their SPSP Address in their profile.
+      text: `Uh oh! <@${params.id}|${params.name}> doesn't have their SPSP Address in their Slack Profile.
 
 I've sent them a message to suggest they add it, but you might want to give them a little nudge as well!`
     }
@@ -203,9 +203,6 @@ I've sent them a message to suggest they add it, but you might want to give them
 
 async function registerHandler (ctx, next) {
   const body = ctx.request.body
-  console.log('register got body', body)
-
-  // TODO don't re-register if they already have an account with us
 
   let username
   let password
@@ -220,7 +217,6 @@ async function registerHandler (ctx, next) {
   } catch (err) {
     console.log('got invalid registration request', body)
     ctx.body = {
-
       text: 'You need to give your SPSP Address and password to register'
     }
     ctx.status = 400
@@ -247,16 +243,21 @@ async function registerHandler (ctx, next) {
     }
   } catch (err) {
     console.log(`error setting SPSP Address field in user profile: ${body.user_id}`, err)
-    ctx.status = 422
     ctx.body = {
-      text: 'Unable to set SPSP Address field in profile'
+      text: `Registered :ok_hand:
+
+Now just set your SPSP Address in your Slack Profile!
+
+You can send payments by typing:
+\`/payto @user amount [optional message]\``
     }
     return
   }
 
-  ctx.status = 200
   ctx.body = {
-    text: `Registered. Now you can start sending payments just by typing:
+    text: `Registered :ok_hand:
+
+You can send payments by typing:
 \`/payto @user amount [optional message]\``
   }
 }
@@ -354,11 +355,11 @@ async function sendSignupMessage ({ toUserId, toUsername, fromUserId, fromUserna
 
 Socrates tells me that <@${fromUserId}|${fromUsername}> just tried to send you money via Interledger. However, you have not inscribed your SPSP Address in your Slack Profile!
 
-If you add your SPSP Address, team members can pay you by typing:
-\`/payto <@${toUserId}|${toUsername}> 10 Here's some money!\`!
-
-You can register to use my knowledger of the Interledger paths with:
+You can register by typing:
 \`/payto register ${toUserId}@your-ilp-kit.example your-password\`
+
+Then you can send payments (and your teammates can pay you) with:
+\`/payto <@${toUserId}|${toUsername}> 10 Here's some money!\`!
 
 
 > _${getPaytoQuote()}_
