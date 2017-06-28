@@ -293,8 +293,9 @@ async function registerHandler (ctx, next) {
     }
   } catch (err) {
     console.log(`error setting SPSP Address field in user profile: ${body.user_id}`, err)
+    // TODO include link to slack profile
     ctx.body = {
-      text: `Registered :ok_hand:
+      text: `Registered \`${spspAddress}\`:ok_hand:
 
 Now just set your SPSP Address in your Slack Profile!
 
