@@ -12,6 +12,7 @@ const util = require('util')
 const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) ?(.*)?$/i
 const REGISTER_REGEX = /register (\S+)@(\S+) (.+)$/i
 const REGISTER_ESCAPED_REGEX = /register .*<mailto:.*\|(\S+?)@(\S+?)\> (.+)$/
+const INFO_REGEX = /info/i
 const SPSP_FIELD_REGEX = /spsp address/gi
 const USER_INFO_URL = 'https://slack.com/api/users.profile.get'
 const USER_PROFILE_SET_URL = 'https://slack.com/api/users.profile.set'
@@ -93,6 +94,8 @@ async function requestHandler (ctx, next) {
     await registerHandler(ctx, next)
   } else if (REGISTER_REGEX.test(body.text)) {
     await registerHandler(ctx, next)
+  } else if (INFO_REGEX.test(body.text)) {
+    await infoHandler(ctx, next)
   } else {
     await sendHelpMessage (ctx, next)
   }
@@ -103,7 +106,54 @@ async function sendHelpMessage (ctx, next) {
     text: `Available commands:
 
     - \`/payto register user@ilp-kit.example password\` - Register ILP Kit account to send payments
-    - \`/payto @user amount [optional message]\` - Send an ILP payment `
+    - \`/payto @user amount [optional message]\`        - Send an ILP payment
+    - \`/payto info\`                                   - Get your balance and SPSP Address
+`
+  }
+}
+
+async function infoHandler (ctx, next) {
+  const body = ctx.request.body
+
+  const credentials = await util.promisify(ctx.db.hgetall).bind(ctx.db)(body.user_id)
+  if (!credentials) {
+    ctx.body = {
+      text: 'You need to register an ILP kit account first!'
+    }
+    return
+  }
+
+  const spspAddress = credentials.username + '@' + (new URL(credentials.ilpKitHost)).host
+
+  let currency
+  let balance
+  try {
+    const userInfoRes = await request.get((new URL(`/api/users/${credentials.username}`, credentials.ilpKitHost)).toString())
+      .auth(credentials.username, credentials.password)
+    console.log(userInfoRes.response)
+    balance = userInfoRes.body.balance
+
+    const configRes = await request.get((new URL('/api/config' , credentials.ilpKitHost)).toString())
+      .auth(credentials.username, credentials.password)
+
+    // TODO change how this works when ilp-kits support multiple currencies
+    currency = configRes.body.currencySymbol || configRes.body.currencyCode
+  } catch (err) {
+    console.log('error getting currency and balance', err)
+  }
+  if (!currency) {
+   currency = '(Unable to determine currency)'
+  }
+  if (!balance) {
+    balance = '(Unable to determine balance)'
+  }
+
+  ctx.body = {
+    text: `Account Info:
+> SPSP Address: \`${spspAddress}\`
+> Balance: \`${currency} ${balance}\`
+
+You can add more money by sending to your SPSP Address from any other ILP/SPSP wallet.`
   }
 }
 
