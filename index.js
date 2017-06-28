@@ -14,7 +14,9 @@ const REGISTER_REGEX = /register (\S+)@(\S+) (\S+)$/i
 const REGISTER_ESCAPED_REGEX = /register .*<mailto:.*\|(\S+?)@(\S+?)\> (\S+)$/
 const SPSP_FIELD_REGEX = /spsp address/gi
 const USER_INFO_URL = 'https://slack.com/api/users.profile.get'
+const USER_PROFILE_SET_URL = 'https://slack.com/api/users.profile.set'
 const POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage'
+const TEAM_PROFILE_URL = 'https://slack.com/api/team.profile.get'
 
 const slackToken = process.env.SLACK_TOKEN
 const slackVerificationToken = process.env.SLACK_VERIFICATION_TOKEN
@@ -42,6 +44,27 @@ app.use(route.get('/', async function (ctx, next) {
 }))
 app.use(verify(slackVerificationToken))
 app.use(route.post('/', requestHandler))
+
+;(async function main () {
+  const teamProfileResponse = await request.post(TEAM_PROFILE_URL)
+    .type('form')
+    .send({
+      token: slackToken
+    })
+  const fields = teamProfileResponse.body.profile.fields
+  for (let field of fields) {
+    if (field.label.match(SPSP_FIELD_REGEX)) {
+      app.context.spspField = field.id
+    }
+  }
+  if (!app.context.spspField) {
+    throw new Error('Could not find SPSP Address field in team profile')
+  }
+
+  console.log('listening on port: ' + port)
+  app.listen(port)
+})().catch(err => console.log(err))
+
 
 function verify (token) {
   return async function verify (ctx, next) {
@@ -119,11 +142,7 @@ async function sendHandler (ctx, next) {
   let spspAddress
   try {
     const user = await getUserInfo(params.id)
-    for (let field of Object.keys(user.profile.fields)) {
-      if (user.profile.fields[field].label.match(SPSP_FIELD_REGEX)) {
-        spspAddress = user.profile.fields[field].value
-      }
-    }
+    spspAddress = user.profile.fields[ctx.spspField]
     if (!spspAddress) {
       throw new Error('could not find SPSP Address field in profile')
     }
@@ -191,11 +210,13 @@ async function registerHandler (ctx, next) {
   let username
   let password
   let ilpKitHost
+  let spspAddress
   try {
     const match = REGISTER_REGEX.exec(body.text)
     username = match[1]
     ilpKitHost = 'https://' + match[2]
     password = match[3]
+    spspAddress = match[1] + '@' + match[2]
   } catch (err) {
     console.log('got invalid registration request', body)
     ctx.body = {
@@ -212,12 +233,31 @@ async function registerHandler (ctx, next) {
     password
   })
 
-  // Respond to the user before we actually try creating the account because it might take too long
+  try {
+    const setProfileRes = await request.post(USER_PROFILE_SET_URL)
+      .type('form')
+      .send({
+        token: slackToken,
+        user: body.user_id,
+        name: ctx.spspField,
+        value: spspAddress
+      })
+    if (!setProfileRes.body.ok) {
+      throw new Error(setProfileRes.body.error)
+    }
+  } catch (err) {
+    console.log(`error setting SPSP Address field in user profile: ${body.user_id}`, err)
+    ctx.status = 422
+    ctx.body = {
+      text: 'Unable to set SPSP Address field in profile'
+    }
+    return
+  }
+
   ctx.status = 200
   ctx.body = {
     text: `Registered. Now you can start sending payments just by typing:
 \`/payto @user amount [optional message]\``
-
   }
 }
 
@@ -342,5 +382,3 @@ function getPaytoQuote () {
   return quotes[Math.floor(Math.random() * quotes.length)]
 }
 
-console.log('listening on port: ' + port)
-app.listen(port)
