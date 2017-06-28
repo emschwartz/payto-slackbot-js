@@ -192,7 +192,7 @@ async function sendHandler (ctx, next) {
   let spspAddress
   try {
     const user = await getUserInfo(params.id)
-    spspAddress = user.profile.fields[ctx.spspField]
+    spspAddress = user.profile.fields[ctx.spspField].value
     if (!spspAddress) {
       throw new Error('could not find SPSP Address field in profile')
     }
