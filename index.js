@@ -8,14 +8,15 @@ const { URL } = require('url')
 const crypto = require('crypto')
 const redis = require('redis')
 const util = require('util')
+const ILP = require('ilp')
+const PluginBells = require('ilp-plugin-bells')
 
 const SEND_REGEX = /^<@([a-z0-9]+)\|([a-z0-9]+)> (\d+\.?\d*) ?(.*)?$/i
-const REGISTER_REGEX = /register (\S+)@(\S+) (.+)$/i
-const REGISTER_ESCAPED_REGEX = /register .*<mailto:.*\|(\S+?)@(\S+?)\> (.+)$/
+const REGISTER_REGEX = /register (.+) (.+)$/i
+const REGISTER_ESCAPED_REGEX = /register <(.+)> (.+)$/
 const INFO_REGEX = /info/i
 const SPSP_FIELD_REGEX = /spsp address/gi
 const USER_INFO_URL = 'https://slack.com/api/users.profile.get'
-const USER_PROFILE_SET_URL = 'https://slack.com/api/users.profile.set'
 const POST_MESSAGE_URL = 'https://slack.com/api/chat.postMessage'
 const TEAM_PROFILE_URL = 'https://slack.com/api/team.profile.get'
 
@@ -87,10 +88,9 @@ async function requestHandler (ctx, next) {
   } else if (REGISTER_ESCAPED_REGEX.test(body.text)) {
     // TODO just use a regex that can handle escaped and unescaped SPSP addresses
     const match = REGISTER_ESCAPED_REGEX.exec(body.text)
-    const username = match[1]
-    const host = match[2]
-    const password = match [3]
-    ctx.request.body.text = `register ${username}@${host} ${password}`
+    const accountUrl = match[1]
+    const password = match [2]
+    ctx.request.body.text = `register ${accountUrl} ${password}`
     await registerHandler(ctx, next)
   } else if (REGISTER_REGEX.test(body.text)) {
     await registerHandler(ctx, next)
@@ -105,9 +105,9 @@ async function sendHelpMessage (ctx, next) {
   ctx.body = {
     text: `Available commands:
 
-    - \`/payto register user@ilp-kit.example password\` - Register ILP Kit account to send payments
-    - \`/payto @user amount [optional message]\`        - Send an ILP payment
-    - \`/payto info\`                                   - Get your balance and SPSP Address
+    - \`/payto register https://provider.example/your-account password\` - Register ILP-enabled account to send payments
+    - \`/payto @user amount [optional message]\`                         - Send an ILP payment
+    - \`/payto info\`                                                    - Get your account balance
 `
   }
 }
@@ -123,21 +123,19 @@ async function infoHandler (ctx, next) {
     return
   }
 
-  const spspAddress = credentials.username + '@' + (new URL(credentials.ilpKitHost)).host
-
   let currency
   let balance
   try {
-    const userInfoRes = await request.get((new URL(`/api/users/${credentials.username}`, credentials.ilpKitHost)).toString())
-      .auth(credentials.username, credentials.password)
-    console.log(userInfoRes.response)
-    balance = userInfoRes.body.balance
-
-    const configRes = await request.get((new URL('/api/config' , credentials.ilpKitHost)).toString())
-      .auth(credentials.username, credentials.password)
-
-    // TODO change how this works when ilp-kits support multiple currencies
-    currency = configRes.body.currencySymbol || configRes.body.currencyCode
+    const plugin = new PluginBells({
+      account: credentials.accountUrl,
+      password: credentials.password
+    })
+    await plugin.connect()
+    const rawBalance = await plugin.getBalance()
+    const info = plugin.getInfo()
+    balance = new BigNumber(rawBalance).shift(info.currencyScale || 0)
+    currency = info.currencySymbol || info.currencyCode
+    await plugin.disconnect()
   } catch (err) {
     console.log('error getting currency and balance', err)
   }
@@ -150,7 +148,6 @@ async function infoHandler (ctx, next) {
 
   ctx.body = {
     text: `Account Info:
-> SPSP Address: \`${spspAddress}\`
 > Balance: \`${currency} ${balance}\`
 
 You can add more money by sending to your SPSP Address from any other ILP/SPSP wallet.`
@@ -221,12 +218,12 @@ I've sent them a message to suggest they add it, but you might want to give them
     amount: params.amount,
     message: params.message,
     credentials
-  }).then(({ sourceAmount, sourceAddress }) => {
+  }).then(({ sourceAmount }) => {
     // TODO add a button to hide the extra details
-    const text = `<@${body.user_id}|${body.user_name}> sent an ILP payment to <@${params.id}|${params.name}> :money_with_wings:
+    const text = `<@${body.user_id}|${body.user_name}> sent an ILP payment to <@${params.id}|${params.name}> (${spspAddress}) :money_with_wings:
 
-> Sender \`${sourceAddress}\` sent \`${sourceAmount}\`
-> Receiver \`${spspAddress}\` received \`${params.amount}\``
+> Sender sent \`${sourceAmount}\`
+> Receiver received \`${params.amount}\``
     return request.post(body.response_url)
       .send({
         response_type: 'in_channel',
@@ -254,63 +251,36 @@ I've sent them a message to suggest they add it, but you might want to give them
 async function registerHandler (ctx, next) {
   const body = ctx.request.body
 
-  let username
+  let accountUrl
   let password
-  let ilpKitHost
-  let spspAddress
   try {
     const match = REGISTER_REGEX.exec(body.text)
-    username = match[1]
-    ilpKitHost = 'https://' + match[2]
-    password = match[3]
-    spspAddress = match[1] + '@' + match[2]
+    accountUrl = match[1]
+    password = match[2]
   } catch (err) {
     console.log('got invalid registration request', body)
     ctx.body = {
-      text: 'You need to give your SPSP Address and password to register'
+      text: 'You need to give your account URL and password to register'
     }
     ctx.status = 400
     return
   }
 
   await util.promisify(ctx.db.hmset).bind(ctx.db)(body.user_id, {
-    ilpKitHost,
-    username,
+    slackUsername: body.user_name,
+    accountUrl,
     password
   })
 
-  try {
-    const setProfileRes = await request.post(USER_PROFILE_SET_URL)
-      .type('form')
-      .send({
-        token: slackToken,
-        user: body.user_id,
-        name: ctx.spspField,
-        value: spspAddress
-      })
-    if (!setProfileRes.body.ok) {
-      throw new Error(setProfileRes.body.error)
-    }
-  } catch (err) {
-    console.log(`error setting SPSP Address field in user profile: ${body.user_id}`, err)
-    // TODO include link to slack profile
-    ctx.body = {
-      text: `Registered \`${spspAddress}\`:ok_hand:
+  ctx.body = {
+    text: `Registered :ok_hand:
 
 Now just set your SPSP Address in your Slack Profile!
 
 You can send payments by typing:
 \`/payto @user amount [optional message]\``
-    }
+  }
     return
-  }
-
-  ctx.body = {
-    text: `Registered :ok_hand:
-
-You can send payments by typing:
-\`/payto @user amount [optional message]\``
-  }
 }
 
 async function sendError (url, err) {
@@ -343,16 +313,17 @@ async function getUserInfo (id) {
 async function sendPayment ({ spspAddress, amount, message, credentials }) {
   console.log(`send SPSP payment for ${amount} to ${spspAddress} with message: "${message}" from ${credentials.username} on ${credentials.ilpKitHost}`)
 
-  const quoteUrl = (new URL('/api/payments/quote', credentials.ilpKitHost)).toString()
   let quote
   try {
-    const quoteResult = await request.post(quoteUrl)
-      .auth(credentials.username, credentials.password)
-      .send({
-        destination: spspAddress,
-        destinationAmount: amount
-      })
-    quote = quoteResult.body
+    const plugin = new PluginBells({
+      account: credentials.accountUrl,
+      password: credentials.password
+    })
+    await plugin.connect()
+    const quote = await ILP.SPSP.quote(plugin, {
+      receiver: spspAddress,
+      destinationAmount: amount
+    })
     console.log('got quote:', quote.sourceAmount)
   } catch (err) {
     console.log('error getting quote', err.status, err.response && err.response.body || err)
@@ -360,35 +331,24 @@ async function sendPayment ({ spspAddress, amount, message, credentials }) {
   }
   // TODO confirm quote with user
 
-  // Get destination details
-  const detailsUrl = (new URL('/api/parse/destination?destination=' + encodeURI(spspAddress), credentials.ilpKitHost)).toString()
-  let destinationDetails
-  try {
-    const detailsResult = await request.get(detailsUrl)
-      .auth(credentials.username, credentials.password)
-    destinationDetails = detailsResult.body
-  } catch (err) {
-    console.log('error getting destination details', err.status, err.response && err.response.body || err)
-    throw new Error('Hmm, I couldn\'t get the details for that user\'s SPSP Address... :confused:')
+  quote.message = message
+  quote.disableEncryption = true
+  quote.headers = {
+    'Source-Name': `${credentials.name} (from Slack Payto bot)`,
+    'Source-Image-Url': 'https://i.imgur.com/F6zpB5O.png',
+    'Message': message
   }
 
-  const paymentUrl = (new URL('/api/payments/' + quote.id, credentials.ilpKitHost)).toString()
   try {
-    await request.put(paymentUrl)
-      .auth(credentials.username, credentials.password)
-      .send({
-        quote,
-        message,
-        destination: destinationDetails
-      })
+    await ILP.SPSP.sendPayment(plugin, quote)
+    await plugin.disconnect()
   } catch (err) {
     console.log('error sending payment', err.status, err.response && err.response.body || err)
     throw new Error('Something went wrong while sending the payment :cold_sweat:')
   }
 
   return {
-    sourceAmount: quote.sourceAmount,
-    sourceAddress: credentials.username + '@' + (new URL(credentials.ilpKitHost)).host
+    sourceAmount: quote.sourceAmount
   }
 
 }
@@ -407,7 +367,7 @@ async function sendSignupMessage ({ toUserId, toUsername, fromUserId, fromUserna
 Socrates tells me that <@${fromUserId}|${fromUsername}> just tried to send you money via Interledger. However, you have not inscribed your SPSP Address in your Slack Profile!
 
 You can register by typing:
-\`/payto register ${toUserId}@your-ilp-kit.example your-password\`
+\`/payto register https://ilp-provider.example/accounts/${toUserId} your-password\`
 
 Then you can send payments (and your teammates can pay you) with:
 \`/payto <@${toUserId}|${toUsername}> 10 Here's some money!\`!
